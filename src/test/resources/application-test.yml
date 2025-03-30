@@ -1,0 +1,11 @@
+spring:
+  profiles:
+    active: test
+  main:
+    allow-bean-definition-overriding: true
+    allow-circular-references: true
+
+datahub:
+  environment: local
+  client:
+    type: in-memory 

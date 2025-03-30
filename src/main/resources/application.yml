@@ -1,0 +1,11 @@
+spring:
+  application:
+    name: sql-lineage-analyzer
+  thymeleaf:
+    cache: false
+
+datahub:
+  server:
+    url: ${DATAHUB_SERVER_URL:http://localhost:8080}
+  token: ${DATAHUB_TOKEN:your-token-here}
+  environment: ${DATAHUB_ENVIRONMENT:local} 
