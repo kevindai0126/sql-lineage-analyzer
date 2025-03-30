@@ -28,40 +28,43 @@ public class SqlLineageAnalyzer {
         // 存储表依赖和使用的列
         Map<String, Set<String>> tableColumns = new HashMap<>();
         Map<String, String> tableAliases = new HashMap<>();
+        Set<String> originalTables = new HashSet<>();
         
         // 处理CTE
         sql = processCTE(sql, tableColumns, tableAliases);
         
-        // 处理主查询
-        processMainQuery(sql, tableColumns, tableAliases);
+        // 处理主查询，识别原始表
+        processMainQuery(sql, tableColumns, tableAliases, originalTables);
         
         // 处理子查询
         processSubqueries(sql, tableColumns, tableAliases);
         
-        // 生成报告
+        // 生成报告，只包含原始表
         StringBuilder report = new StringBuilder();
         report.append("Table Dependencies:\n");
-        for (String table : tableColumns.keySet()) {
+        for (String table : originalTables) {
             report.append("  - ").append(table).append("\n");
         }
         
         report.append("\nUsed Columns:\n");
-        for (Map.Entry<String, Set<String>> entry : tableColumns.entrySet()) {
-            report.append("  ").append(entry.getKey()).append(":\n");
-            for (String column : entry.getValue()) {
-                report.append("    - ").append(column).append("\n");
+        for (String table : originalTables) {
+            Set<String> columns = tableColumns.get(table);
+            if (columns != null) {
+                report.append("  ").append(table).append(":\n");
+                for (String column : columns) {
+                    report.append("    - ").append(column).append("\n");
+                }
             }
         }
 
-        // 添加schema信息
+        // 添加schema信息，只包含原始表
         report.append("\nSchema Information:\n");
-        for (Map.Entry<String, Set<String>> entry : tableColumns.entrySet()) {
-            String tableName = entry.getKey();
-            String[] parts = tableName.split("\\.");
+        for (String table : originalTables) {
+            String[] parts = table.split("\\.");
             if (parts.length == 3) {
                 Map<String, String> schema = dataHubService.getTableSchema(parts[0], parts[1], parts[2]);
                 if (!schema.isEmpty()) {
-                    report.append("  ").append(tableName).append(":\n");
+                    report.append("  ").append(table).append(":\n");
                     schema.forEach((field, type) -> 
                         report.append("    - ").append(field).append(" (").append(type).append(")\n"));
                 }
@@ -91,11 +94,13 @@ public class SqlLineageAnalyzer {
             String[] ctes = ctePart.split(",\\s*");
             
             for (String cte : ctes) {
-                String[] parts = cte.trim().split("\\s+AS\\s*\\(", 2);
-                if (parts.length == 2) {
-                    String cteName = parts[0].trim();
-                    String cteQuery = parts[1].substring(0, parts[1].lastIndexOf(")"));
-                    processMainQuery(cteQuery, tableColumns, tableAliases);
+                // 使用更安全的方式提取CTE查询
+                Pattern cteQueryPattern = Pattern.compile("\\s+AS\\s*\\(([\\s\\S]+?)\\)", Pattern.CASE_INSENSITIVE);
+                Matcher cteQueryMatcher = cteQueryPattern.matcher(cte);
+                
+                if (cteQueryMatcher.find()) {
+                    String cteQuery = cteQueryMatcher.group(1);
+                    processMainQuery(cteQuery, tableColumns, tableAliases, null);
                 }
             }
         }
@@ -103,18 +108,18 @@ public class SqlLineageAnalyzer {
         return sql;
     }
 
-    private void processMainQuery(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases) {
+    private void processMainQuery(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases, Set<String> originalTables) {
         // 处理FROM和JOIN子句
-        processTableReferences(sql, tableColumns, tableAliases);
+        processTableReferences(sql, tableColumns, tableAliases, originalTables);
         
         // 处理SELECT子句中的列引用
         processColumnReferences(sql, tableAliases, tableColumns);
     }
 
-    private void processTableReferences(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases) {
-        // 匹配FROM和JOIN子句中的表引用
+    private void processTableReferences(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases, Set<String> originalTables) {
+        // 匹配FROM和JOIN子句中的表引用，支持连字符
         Pattern tablePattern = Pattern.compile(
-            "(?:FROM|JOIN)\\s+([\\w.`]+)(?:\\s+AS\\s+([\\w]+))?",
+            "(?:FROM|JOIN)\\s+`?([\\w.`-]+)`?(?:\\s+AS\\s+([\\w]+))?",
             Pattern.CASE_INSENSITIVE
         );
         
@@ -128,6 +133,11 @@ public class SqlLineageAnalyzer {
             }
             
             tableColumns.computeIfAbsent(tableName, k -> new HashSet<>());
+            
+            // 如果是主查询，记录原始表
+            if (originalTables != null) {
+                originalTables.add(tableName);
+            }
         }
     }
 
@@ -142,16 +152,16 @@ public class SqlLineageAnalyzer {
         if (matcher.find()) {
             String columnsPart = matcher.group(1);
             
-            // 匹配列引用
+            // 匹配列引用，支持连字符
             Pattern columnRefPattern = Pattern.compile(
-                "(?:([\\w.]+)\\.)?([\\w.]+)",
+                "(?:([\\w.`-]+)\\.)?`?([\\w.`-]+)`?",
                 Pattern.CASE_INSENSITIVE
             );
             
             Matcher columnRefMatcher = columnRefPattern.matcher(columnsPart);
             while (columnRefMatcher.find()) {
                 String tableRef = columnRefMatcher.group(1);
-                String columnName = columnRefMatcher.group(2);
+                String columnName = columnRefMatcher.group(2).replaceAll("`", "");
                 
                 if (tableRef != null) {
                     // 处理带表引用的列
@@ -179,7 +189,7 @@ public class SqlLineageAnalyzer {
         Matcher matcher = subqueryPattern.matcher(sql);
         while (matcher.find()) {
             String subquery = matcher.group(0);
-            processMainQuery(subquery.substring(1, subquery.length() - 1), tableColumns, tableAliases);
+            processMainQuery(subquery.substring(1, subquery.length() - 1), tableColumns, tableAliases, null);
         }
     }
 } 

@@ -10,8 +10,12 @@ import org.springframework.stereotype.Service;
 @Service
 public class DataHubService {
 
+    private final DataHubClient dataHubClient;
+
     @Autowired
-    private DataHubClient dataHubClient;
+    public DataHubService(DataHubClient dataHubClient) {
+        this.dataHubClient = dataHubClient;
+    }
 
     public Map<String, String> getTableSchema(String projectId, String datasetId, String tableId) {
         Map<String, String> schema = new HashMap<>();
