@@ -56,7 +56,7 @@ class SqlLineageAnalyzerTest {
     void testAnalyzeSimpleSelect() {
         String sql = "SELECT id, name FROM test-project.test-dataset.users";
         String result = sqlLineageAnalyzer.analyzeLineage(sql);
-        
+        System.out.println("Result:" + result.toString());
         assertNotNull(result);
         assertTrue(result.contains("Table Dependencies"));
         assertTrue(result.contains("test-project.test-dataset.users"));
@@ -91,12 +91,15 @@ class SqlLineageAnalyzerTest {
                     "FROM test-project.test-dataset.users u " +
                     "JOIN user_orders uo ON u.id = uo.user_id";
         String result = sqlLineageAnalyzer.analyzeLineage(sql);
-        
+        System.out.println("Result:" + result.toString());
         assertNotNull(result);
         assertTrue(result.contains("test-project.test-dataset.users"));
         assertTrue(result.contains("test-project.test-dataset.orders"));
         assertTrue(result.contains("name"));
         assertTrue(result.contains("user_id"));
+        
+        assertFalse(result.contains("user_orders"));
+        assertFalse(result.contains("order_count"));
     }
 
     @Test
@@ -113,6 +116,8 @@ class SqlLineageAnalyzerTest {
         assertTrue(result.contains("name"));
         assertTrue(result.contains("order_id"));
         assertTrue(result.contains("amount"));
+        
+        assertFalse(result.contains("AVG(amount)"));
     }
 
     @Test
@@ -168,7 +173,7 @@ class SqlLineageAnalyzerTest {
                     "JOIN test-project.test-dataset.products p ON oi.product_id = p.product_id " +
                     "JOIN product_stats ps ON p.product_id = ps.product_id";
         String result = sqlLineageAnalyzer.analyzeLineage(sql);
-        
+        System.out.println("Result:" + result.toString());
         assertNotNull(result);
         assertTrue(result.contains("test-project.test-dataset.users"));
         assertTrue(result.contains("test-project.test-dataset.orders"));
@@ -178,6 +183,12 @@ class SqlLineageAnalyzerTest {
         assertTrue(result.contains("user_id"));
         assertTrue(result.contains("product_id"));
         assertTrue(result.contains("amount"));
+        
+        assertFalse(result.contains("user_stats"));
+        assertFalse(result.contains("product_stats"));
+        assertFalse(result.contains("order_count"));
+        assertFalse(result.contains("total_amount"));
+        assertFalse(result.contains("sales_count"));
     }
 
     @Test
@@ -217,7 +228,7 @@ class SqlLineageAnalyzerTest {
                     "JOIN test-project.test-dataset.order_items oi ON u.id = oi.order_id " +
                     "JOIN second_cte sc ON oi.product_id = sc.product_id";
         String result = sqlLineageAnalyzer.analyzeLineage(sql);
-        
+        System.out.println("Result:" + result.toString());
         assertNotNull(result);
         assertTrue(result.contains("test-project.test-dataset.users"));
         assertTrue(result.contains("test-project.test-dataset.orders"));
@@ -225,6 +236,11 @@ class SqlLineageAnalyzerTest {
         assertTrue(result.contains("name"));
         assertTrue(result.contains("user_id"));
         assertTrue(result.contains("product_id"));
+        
+        assertFalse(result.contains("first_cte"));
+        assertFalse(result.contains("second_cte"));
+        assertFalse(result.contains("order_count"));
+        assertFalse(result.contains("total_quantity"));
     }
 
     @Test
@@ -249,6 +265,9 @@ class SqlLineageAnalyzerTest {
         assertTrue(result.contains("order_id"));
         assertTrue(result.contains("amount"));
         assertTrue(result.contains("created_at"));
+        
+        assertFalse(result.contains("AVG(amount)"));
+        assertFalse(result.contains("MAX(created_at)"));
     }
 
     @Test

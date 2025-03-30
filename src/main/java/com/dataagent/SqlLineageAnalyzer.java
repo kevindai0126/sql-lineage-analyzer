@@ -28,38 +28,70 @@ public class SqlLineageAnalyzer {
         // 存储表依赖和使用的列
         Map<String, Set<String>> tableColumns = new HashMap<>();
         Map<String, String> tableAliases = new HashMap<>();
-        Set<String> originalTables = new HashSet<>();
+        Set<String> leafTables = new HashSet<>();
+        Set<String> intermediateTables = new HashSet<>();
+        Set<String> usedColumns = new HashSet<>();
         
-        // 处理CTE
-        sql = processCTE(sql, tableColumns, tableAliases);
+        try {
+            // 处理WITH子句
+            Pattern withPattern = Pattern.compile("WITH\\s+([^\\s]+)\\s+AS\\s*\\(([^()]+|\\([^()]*\\))*\\)(?:\\s*,\\s*([^\\s]+)\\s+AS\\s*\\(([^()]+|\\([^()]*\\))*\\))*\\s*SELECT", 
+                Pattern.DOTALL | Pattern.CASE_INSENSITIVE);
+            Matcher withMatcher = withPattern.matcher(sql);
+            
+            while (withMatcher.find()) {
+                // 处理第一个CTE
+                String cteName = withMatcher.group(1).trim();
+                String cteQuery = withMatcher.group(2).trim();
+                intermediateTables.add(cteName);
+                processQuery(cteQuery, tableColumns, tableAliases, leafTables, intermediateTables, usedColumns);
+                
+                // 处理后续的CTE
+                if (withMatcher.group(3) != null) {
+                    String secondCteName = withMatcher.group(3).trim();
+                    String secondCteQuery = withMatcher.group(4).trim();
+                    intermediateTables.add(secondCteName);
+                    processQuery(secondCteQuery, tableColumns, tableAliases, leafTables, intermediateTables, usedColumns);
+                }
+            }
+            
+            // 移除WITH子句，处理主查询
+            String mainQuery = sql.replaceAll("WITH\\s+[^\\s]+\\s+AS\\s*\\((?:[^()]+|\\([^()]*\\))*\\)(?:\\s*,\\s*[^\\s]+\\s+AS\\s*\\((?:[^()]+|\\([^()]*\\))*\\))*\\s*", "");
+            processQuery(mainQuery, tableColumns, tableAliases, leafTables, intermediateTables, usedColumns);
+            
+            // 从leafTables中移除中间表
+            leafTables.removeAll(intermediateTables);
+            
+            // 从tableColumns中移除中间表的列
+            intermediateTables.forEach(tableColumns::remove);
+            
+        } catch (Exception e) {
+            log.error("Failed to parse SQL: {}", sql, e);
+            return "Error: Failed to parse SQL";
+        }
         
-        // 处理主查询，识别原始表
-        processMainQuery(sql, tableColumns, tableAliases, originalTables);
-        
-        // 处理子查询
-        processSubqueries(sql, tableColumns, tableAliases);
-        
-        // 生成报告，只包含原始表
+        // 生成报告，只包含叶子节点表
         StringBuilder report = new StringBuilder();
         report.append("Table Dependencies:\n");
-        for (String table : originalTables) {
+        for (String table : leafTables) {
             report.append("  - ").append(table).append("\n");
         }
         
         report.append("\nUsed Columns:\n");
-        for (String table : originalTables) {
+        for (String table : leafTables) {
             Set<String> columns = tableColumns.get(table);
             if (columns != null) {
                 report.append("  ").append(table).append(":\n");
                 for (String column : columns) {
-                    report.append("    - ").append(column).append("\n");
+                    if (usedColumns.contains(column)) {
+                        report.append("    - ").append(column).append("\n");
+                    }
                 }
             }
         }
 
-        // 添加schema信息，只包含原始表
+        // 添加schema信息，只包含叶子节点表
         report.append("\nSchema Information:\n");
-        for (String table : originalTables) {
+        for (String table : leafTables) {
             String[] parts = table.split("\\.");
             if (parts.length == 3) {
                 Map<String, String> schema = dataHubService.getTableSchema(parts[0], parts[1], parts[2]);
@@ -82,114 +114,80 @@ public class SqlLineageAnalyzer {
         // 移除多余空白
         sql = sql.replaceAll("\\s+", " ").trim();
         
-        return sql;
-    }
-
-    private String processCTE(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases) {
-        Pattern ctePattern = Pattern.compile("WITH\\s+([\\s\\S]+?)\\s+SELECT", Pattern.CASE_INSENSITIVE);
-        Matcher cteMatcher = ctePattern.matcher(sql);
-        
-        if (cteMatcher.find()) {
-            String ctePart = cteMatcher.group(1);
-            String[] ctes = ctePart.split(",\\s*");
-            
-            for (String cte : ctes) {
-                // 使用更安全的方式提取CTE查询
-                Pattern cteQueryPattern = Pattern.compile("\\s+AS\\s*\\(([\\s\\S]+?)\\)", Pattern.CASE_INSENSITIVE);
-                Matcher cteQueryMatcher = cteQueryPattern.matcher(cte);
-                
-                if (cteQueryMatcher.find()) {
-                    String cteQuery = cteQueryMatcher.group(1);
-                    processMainQuery(cteQuery, tableColumns, tableAliases, null);
-                }
-            }
-        }
+        // 处理反引号
+        sql = sql.replaceAll("`([^`]+)`", "$1");
         
         return sql;
     }
 
-    private void processMainQuery(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases, Set<String> originalTables) {
-        // 处理FROM和JOIN子句
-        processTableReferences(sql, tableColumns, tableAliases, originalTables);
+    private void processQuery(String sql, Map<String, Set<String>> tableColumns,
+                            Map<String, String> tableAliases, Set<String> leafTables,
+                            Set<String> intermediateTables, Set<String> usedColumns) {
+        // 处理FROM子句
+        Pattern fromPattern = Pattern.compile("FROM\\s+([^\\s]+)(?:\\s+(?:AS\\s+)?([^\\s]+))?", Pattern.CASE_INSENSITIVE);
+        Matcher fromMatcher = fromPattern.matcher(sql);
         
-        // 处理SELECT子句中的列引用
-        processColumnReferences(sql, tableAliases, tableColumns);
-    }
-
-    private void processTableReferences(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases, Set<String> originalTables) {
-        // 匹配FROM和JOIN子句中的表引用，支持连字符
-        Pattern tablePattern = Pattern.compile(
-            "(?:FROM|JOIN)\\s+`?([\\w.`-]+)`?(?:\\s+AS\\s+([\\w]+))?",
-            Pattern.CASE_INSENSITIVE
-        );
-        
-        Matcher matcher = tablePattern.matcher(sql);
-        while (matcher.find()) {
-            String tableName = matcher.group(1).replaceAll("`", "");
-            String alias = matcher.group(2);
+        while (fromMatcher.find()) {
+            String tableName = fromMatcher.group(1).trim();
+            String alias = fromMatcher.group(2) != null ? fromMatcher.group(2).trim() : null;
             
             if (alias != null) {
                 tableAliases.put(alias, tableName);
             }
             
-            tableColumns.computeIfAbsent(tableName, k -> new HashSet<>());
-            
-            // 如果是主查询，记录原始表
-            if (originalTables != null) {
-                originalTables.add(tableName);
+            if (!intermediateTables.contains(tableName)) {
+                tableColumns.computeIfAbsent(tableName, k -> new HashSet<>());
+                leafTables.add(tableName);
             }
         }
-    }
-
-    private void processColumnReferences(String sql, Map<String, String> tableAliases, Map<String, Set<String>> tableColumns) {
-        // 匹配SELECT子句中的列引用
-        Pattern columnPattern = Pattern.compile(
-            "(?:SELECT|WHERE|GROUP BY|ORDER BY|HAVING)\\s+([\\s\\S]+?)(?:FROM|$)",
-            Pattern.CASE_INSENSITIVE
-        );
         
-        Matcher matcher = columnPattern.matcher(sql);
-        if (matcher.find()) {
-            String columnsPart = matcher.group(1);
+        // 处理JOIN子句
+        Pattern joinPattern = Pattern.compile("JOIN\\s+([^\\s]+)(?:\\s+(?:AS\\s+)?([^\\s]+))?", Pattern.CASE_INSENSITIVE);
+        Matcher joinMatcher = joinPattern.matcher(sql);
+        
+        while (joinMatcher.find()) {
+            String tableName = joinMatcher.group(1).trim();
+            String alias = joinMatcher.group(2) != null ? joinMatcher.group(2).trim() : null;
             
-            // 匹配列引用，支持连字符
-            Pattern columnRefPattern = Pattern.compile(
-                "(?:([\\w.`-]+)\\.)?`?([\\w.`-]+)`?",
-                Pattern.CASE_INSENSITIVE
-            );
+            if (alias != null) {
+                tableAliases.put(alias, tableName);
+            }
             
-            Matcher columnRefMatcher = columnRefPattern.matcher(columnsPart);
-            while (columnRefMatcher.find()) {
-                String tableRef = columnRefMatcher.group(1);
-                String columnName = columnRefMatcher.group(2).replaceAll("`", "");
-                
-                if (tableRef != null) {
-                    // 处理带表引用的列
+            if (!intermediateTables.contains(tableName)) {
+                tableColumns.computeIfAbsent(tableName, k -> new HashSet<>());
+                leafTables.add(tableName);
+            }
+        }
+        
+        // 处理SELECT子句
+        Pattern selectPattern = Pattern.compile("SELECT\\s+(.+?)\\s+FROM", Pattern.DOTALL | Pattern.CASE_INSENSITIVE);
+        Matcher selectMatcher = selectPattern.matcher(sql);
+        
+        if (selectMatcher.find()) {
+            String selectClause = selectMatcher.group(1).trim();
+            String[] columns = selectClause.split(",");
+            
+            for (String column : columns) {
+                column = column.trim();
+                if (column.contains(".")) {
+                    String[] parts = column.split("\\.");
+                    String tableRef = parts[0].trim();
+                    String columnName = parts[1].trim();
+                    
                     String tableName = tableAliases.getOrDefault(tableRef, tableRef);
-                    if (tableColumns.containsKey(tableName)) {
+                    if (tableColumns.containsKey(tableName) && !intermediateTables.contains(tableName)) {
                         tableColumns.get(tableName).add(columnName);
+                        usedColumns.add(columnName);
                     }
                 } else {
-                    // 处理不带表引用的列
                     for (String tableName : tableColumns.keySet()) {
-                        tableColumns.get(tableName).add(columnName);
+                        if (!intermediateTables.contains(tableName)) {
+                            tableColumns.get(tableName).add(column);
+                            usedColumns.add(column);
+                        }
                     }
                 }
             }
-        }
-    }
-
-    private void processSubqueries(String sql, Map<String, Set<String>> tableColumns, Map<String, String> tableAliases) {
-        // 匹配子查询
-        Pattern subqueryPattern = Pattern.compile(
-            "\\(\\s*SELECT\\s+[\\s\\S]+?\\s+FROM\\s+[\\s\\S]+?\\s+\\)",
-            Pattern.CASE_INSENSITIVE
-        );
-        
-        Matcher matcher = subqueryPattern.matcher(sql);
-        while (matcher.find()) {
-            String subquery = matcher.group(0);
-            processMainQuery(subquery.substring(1, subquery.length() - 1), tableColumns, tableAliases, null);
         }
     }
 } 
